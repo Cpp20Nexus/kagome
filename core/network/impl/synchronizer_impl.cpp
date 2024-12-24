@@ -86,6 +86,8 @@ namespace {
 
 namespace kagome::network {
 
+  static constexpr auto default_max_peers_for_block_request = 5;
+
   SynchronizerImpl::SynchronizerImpl(
       const application::AppConfiguration &app_config,
       application::AppStateManager &app_state_manager,
@@ -122,7 +124,8 @@ namespace kagome::network {
         chain_sub_engine_(std::move(chain_sub_engine)),
         main_pool_handler_{
             poolHandlerReadyMake(app_state_manager, main_thread_pool)},
-        block_storage_{std::move(block_storage)} {
+        block_storage_{std::move(block_storage)},
+        max_peers_for_block_request_{default_max_peers_for_block_request} {
     BOOST_ASSERT(block_tree_);
     BOOST_ASSERT(block_executor_);
     BOOST_ASSERT(trie_node_db_);
@@ -1192,7 +1195,69 @@ namespace kagome::network {
             }
           }
         };
-
+        std::vector<libp2p::peer::PeerId> selected_peers;
+        const auto total_peers = peer_manager_->activePeersNumber();
+        SL_INFO(log_, "Total active peers number: {}", total_peers);
+        if (max_peers_for_block_request_ >= total_peers) {
+          selected_peers.push_back(peer_id);
+          peer_manager_->forEachPeer(
+              [&selected_peers, &peer_id](const auto &peer) {
+                if (peer != peer_id) {
+                  selected_peers.push_back(peer);
+                }
+              });
+        } else {
+          selected_peers.push_back(peer_id);
+          std::vector<int> indices(total_peers);
+          std::iota(indices.begin(), indices.end(), 0);
+          std::random_device rd;
+          std::mt19937 gen(rd());
+          std::shuffle(indices.begin(), indices.end(), gen);
+          std::unordered_set<int> random_peers_indexes(
+              indices.begin(),
+              indices.begin()
+                  + (max_peers_for_block_request_
+                         ? max_peers_for_block_request_ - 1
+                         : 0));
+          auto index = 0;
+          std::optional<int> current_peer_index;
+          peer_manager_->forEachPeer([&selected_peers,
+                                      &random_peers_indexes,
+                                      &index,
+                                      &peer_id,
+                                      &current_peer_index](const auto &peer) {
+            if (random_peers_indexes.find(index)
+                != random_peers_indexes.end()) {
+              if (peer == peer_id) {
+                current_peer_index = index;
+                return;
+              }
+              selected_peers.push_back(peer);
+            }
+            index++;
+          });
+          if (current_peer_index) {
+            index = 0;
+            peer_manager_->forEachPeer([&selected_peers,
+                                        &random_peers_indexes,
+                                        &index,
+                                        &current_peer_index](const auto &peer) {
+              if (current_peer_index and index != *current_peer_index) {
+                if (random_peers_indexes.find(index)
+                    == random_peers_indexes.end()) {
+                  selected_peers.push_back(peer);
+                  current_peer_index.reset();
+                  return;
+                }
+                (*current_peer_index)++;
+              }
+              ++index;
+            });
+          }
+        }
+        for (const auto &p_id : selected_peers) {
+          SL_INFO(log_, "selected peer: {}", p_id);
+        }
         if (sync_method_ == application::SyncMethod::Full) {
           auto lower = generations_.begin()->number;
           auto upper = generations_.rbegin()->number + 1;
@@ -1209,7 +1274,10 @@ namespace kagome::network {
               lower,
               upper,
               hint,
-              [wp{weak_from_this()}, peer_id, handler = std::move(handler)](
+              [wp{weak_from_this()},
+               peer_id,
+               handler = std::move(handler),
+               selected_peers = std::move(selected_peers)](
                   outcome::result<primitives::BlockInfo> res) {
                 if (auto self = wp.lock()) {
                   if (not res.has_value()) {
@@ -1221,22 +1289,26 @@ namespace kagome::network {
                     return;
                   }
                   auto &common_block_info = res.value();
-                  SL_DEBUG(self->log_,
-                           "Start to load next portion of blocks from {} "
-                           "since block {}",
-                           peer_id,
-                           common_block_info);
-                  self->loadBlocks(
-                      peer_id, common_block_info, std::move(handler));
+                  for (const auto &p_id : selected_peers) {
+                    SL_INFO(self->log_,
+                            "Start to load next portion of blocks from {} "
+                            "since block {}",
+                            p_id,
+                            common_block_info);
+                    self->loadBlocks(
+                        p_id, common_block_info, std::move(handler));
+                  }
                 }
               });
         } else {
-          SL_DEBUG(log_,
-                   "Start to load next portion of blocks from {} "
-                   "since block {}",
-                   peer_id,
-                   block_info);
-          loadBlocks(peer_id, block_info, std::move(handler));
+          for (const auto &p_id : selected_peers) {
+            SL_INFO(log_,
+                    "Start to load next portion of blocks from {} "
+                    "since block {}",
+                    p_id,
+                    block_info);
+            loadBlocks(p_id, block_info, std::move(handler));
+          }
         }
         return;
       }
