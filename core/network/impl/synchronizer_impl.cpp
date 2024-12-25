@@ -1215,36 +1215,19 @@ namespace kagome::network {
         selected_peers.push_back(peer_id);
         const auto number_of_peers_to_add =
             max_peers_for_block_request_ ? max_peers_for_block_request_ - 1 : 0;
-        if (int active_peers_size = static_cast<int>(active_peers.size());
+        if (auto active_peers_size = active_peers.size();
             active_peers_size <= number_of_peers_to_add) {
           for (const auto &p_id : active_peers) {
             selected_peers.push_back(p_id);
           }
         } else {
-          std::vector<int> indices(active_peers_size);
+          std::vector<uint32_t> indices(active_peers_size);
           std::iota(indices.begin(), indices.end(), 0);
           std::random_device rd;
           std::mt19937 gen(rd());
           std::shuffle(indices.begin(), indices.end(), gen);
-          std::unordered_set<int> random_peers_indexes(
-              indices.begin(), indices.begin() + number_of_peers_to_add);
-          std::optional<int> peer_index;
-          for (const auto &index : random_peers_indexes) {
-            const auto &potential_peer = active_peers[index];
-            if (potential_peer != peer_id) {
-              selected_peers.push_back(active_peers[index]);
-            } else {
-              peer_index = index;
-            }
-          }
-          if (peer_index) {
-            for (auto i = 0; i < active_peers_size; i++) {
-              if (random_peers_indexes.find(i) == random_peers_indexes.end()
-                  and i != peer_index.value()) {
-                selected_peers.push_back(active_peers[i]);
-                break;
-              }
-            }
+          for (uint32_t i = 0; i < number_of_peers_to_add; ++i) {
+            selected_peers.push_back(active_peers[indices[i]]);
           }
         }
         if (sync_method_ == application::SyncMethod::Full) {
