@@ -341,11 +341,11 @@ namespace kagome::network {
           return true;
         });
     std::ranges::shuffle(active_peers, random_gen_);
-    for (auto it = active_peers.begin(); it != active_peers.end(); ++it) {
+    for (const auto &p_id : active_peers) {
       if (selected_peers.size() >= max_parallel_downloads_) {
         break;
       }
-      selected_peers.push_back(*it);
+      selected_peers.push_back(p_id);
     }
     // Block is already enqueued
     if (auto it = known_blocks_.find(block_info.hash);
